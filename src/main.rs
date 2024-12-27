@@ -145,7 +145,6 @@ fn calculate_probs(card: &BingoCard, unchosen_number_set: &HashSet<i32>) -> Vec<
     let prob_list: Vec<f64> = (1..=PROB_COUNT)
         .map(|i| {
             let prob = calc_probability(unchosen_number_set, &unchosen_group_list, i);
-            dbg!(prob);
             prob
         })
         .collect();
