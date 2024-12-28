@@ -5,8 +5,140 @@ use std::{
     num::ParseIntError,
 };
 // use textplots::{Chart, Plot, Shape};
+use futures::stream::{self, RepeatWith, StreamExt};
+use std::hash::{Hash, Hasher};
 
 const PROB_COUNT: usize = 3;
+
+#[derive(Clone, Debug)]
+struct ProbProgress {
+    bingo_count: i128,
+    already_bingo_line_set: Vec<HashSet<i32>>,
+    // chosen_numbers_bingo: Vec<Vec<i32>>,
+    not_bing_line_set: Vec<HashSet<i32>>,
+}
+
+async fn evaluate_bing_board_and_calculate(card: &BingoCard, unchosen_number_set: &HashSet<i32>) {
+    // ex.
+    // 当たればビンゴの数字たち
+    // [5],
+    // [1,5],
+    // [43,12],
+    // [12,55],
+    // [12,23,69],
+    let bingo_line_list: Vec<_> = LINE_PATTERNS
+        .into_iter()
+        .map(|pattern| {
+            pattern
+                .into_iter()
+                .filter(|(row_index, column_index)| !card.state[*row_index][*column_index])
+                .map(|(row_index, column_index)| card.numbers[row_index][column_index])
+                .collect::<HashSet<i32>>()
+        })
+        .collect();
+
+    let mut prob_stream = _calculate_probs(bingo_line_list, unchosen_number_set).await;
+
+    loop {
+        let (n, pattern_count, prob) = prob_stream.next().await.unwrap();
+        println!(
+            "{}回目までにBINGOになる確率: {}% ({}パターン)",
+            n,
+            prob * 100.,
+            pattern_count,
+        );
+    }
+}
+
+async fn _calculate_probs<'a>(
+    // card: &BingoCard,
+    bingo_line_list: Vec<HashSet<i32>>,
+    unchosen_number_set: &'a HashSet<i32>,
+) -> RepeatWith<impl FnMut() -> (i128, i128, f64) + 'a> {
+    let mut prob_progress = ProbProgress {
+        bingo_count: 0,
+        already_bingo_line_set: vec![HashSet::new()],
+        not_bing_line_set: vec![HashSet::new()],
+    };
+
+    let mut n: i128 = 1;
+    let prob_stream = stream::repeat_with(move || {
+        let mut new_prob_progress = ProbProgress {
+            bingo_count: 0,
+            already_bingo_line_set: prob_progress.already_bingo_line_set.clone(),
+            not_bing_line_set: vec![],
+        };
+
+        // println!("------{}-----", &n);
+
+        let all_pattern_count = pattern(unchosen_number_set.len() as i128, n as i128);
+
+        // dbg!(&prob_progress.not_bing_line_set);
+
+        let already_bingo_number = prob_progress.bingo_count;
+
+        new_prob_progress.bingo_count +=
+            already_bingo_number * (unchosen_number_set.len() as i128 - (n - 1));
+        // println!("加算されました, {}", &new_prob_progress.bingo_count);
+
+        for chosen_number_set_not_bingo in prob_progress.not_bing_line_set.iter() {
+            // dbg!(&chosen_number_set_not_bingo);
+            // [1,2,3,4]
+            for i in unchosen_number_set {
+                if chosen_number_set_not_bingo.contains(i) {
+                    // println!("スキップ, {:?} {:?}", &i, &chosen_number_set_not_bingo.0);
+                    continue;
+                }
+
+                let mut new_chosen_number_set = chosen_number_set_not_bingo.clone();
+                new_chosen_number_set.insert(*i);
+
+                // if new_prob_progress
+                //     .already_bingo_line_set
+                //     .iter()
+                //     .any(|group| group.0.is_subset(&chosen_number_set_not_bingo.0))
+                // {
+                //     continue;
+                // }
+
+                // [2,4]
+                // dbg!(&new_chosen_number_set.0);
+                let is_bingo = bingo_line_list.iter().any(|group| {
+                    // dbg!(&group);
+                    // dbg!(&new_chosen_number_set.0);
+                    group.len() <= (n as usize) && group.is_subset(&new_chosen_number_set)
+                });
+
+                if is_bingo {
+                    // println!("{:?}はビンゴです！", &new_chosen_number_set);
+                    new_prob_progress
+                        .already_bingo_line_set
+                        .push(new_chosen_number_set);
+
+                    new_prob_progress.bingo_count += 1;
+                } else {
+                    // println!("{:?}はビンゴになりませんでした", &new_chosen_number_set);
+                    new_prob_progress
+                        .not_bing_line_set
+                        .push(new_chosen_number_set);
+                }
+            }
+        }
+
+        prob_progress = new_prob_progress;
+
+        n += 1;
+
+        // ラウンドと手先と確率のペアを返す
+        (
+            (n - 1),
+            all_pattern_count,
+            (prob_progress.bingo_count as f64) / (all_pattern_count as f64),
+        )
+    });
+
+    prob_stream
+}
 
 struct BingoCard {
     numbers: [[i32; 5]; 5],
@@ -35,7 +167,8 @@ impl fmt::Display for BingoCard {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let all_number_set = (1..=75).collect::<HashSet<i32>>();
     let mut unchosen_number_set = all_number_set.clone();
     let mut choosen_number_set: HashSet<i32> = HashSet::new();
@@ -94,11 +227,12 @@ fn main() {
             break;
         }
 
-        let probs = calculate_probs(&card, &unchosen_number_set);
+        // let probs = calculate_probs(&card, &unchosen_number_set);
+        evaluate_bing_board_and_calculate(&card, &unchosen_number_set).await;
 
-        probs.iter().enumerate().for_each(|(i, prob)| {
-            println!("{:03}回目までにBINGOになる確率: {}%", i + 1, prob * 100.);
-        });
+        // probs.iter().enumerate().for_each(|(i, prob)| {
+        //     println!("{:03}回目までにBINGOになる確率: {}%", i + 1, prob * 100.);
+        // });
 
         // let mut points = [(0f32, 0f32); PROB_COUNT];
         // probs.iter().enumerate().for_each(|(i, prob)| {
@@ -366,5 +500,31 @@ mod test {
             3,
         );
         assert_eq!(pattern_count, 48. / 60.);
+    }
+
+    #[tokio::test]
+    async fn test_stream_1() {
+        let a = HashSet::from([1, 2, 3, 4, 5]);
+        let prob_stream = _calculate_probs(
+            vec![
+                HashSet::from([1]),          // 1.
+                HashSet::from([2, 3]),       // 2.
+                HashSet::from([1, 4, 5]),    // 3.
+                HashSet::from([3, 4, 5, 2]), // 4.
+            ],
+            &a,
+        );
+
+        let mut prob_stream = prob_stream.await;
+        // 1. 1patterns
+        assert_eq!(prob_stream.next().await, Some((1, 5, 0.2)));
+
+        // 1. 1*4*2=8patterns
+        // 2. 1*2=2patterns
+        assert_eq!(prob_stream.next().await, Some((2, 20, 0.5)));
+
+        // 1. 12*3=36patterns
+        // 2. 2 x3 x2 = 12patterns
+        assert_eq!(prob_stream.next().await, Some((3, 60, 0.8)));
     }
 }
