@@ -1,15 +1,15 @@
 use colored::Colorize;
 use core::fmt;
+use futures::stream::{self, RepeatWith, StreamExt};
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
 use std::{
     collections::HashSet,
     io::{self, Write},
     num::ParseIntError,
     sync::Arc,
-    time::Duration,
 };
-
-use futures::stream::{self, RepeatWith, StreamExt};
-use tokio::{sync::Mutex, time::sleep};
+use tokio::sync::Mutex;
 
 #[derive(Clone, Debug)]
 struct ProbProgress {
@@ -36,7 +36,7 @@ async fn evaluate_bingo_board_and_calculate(
         .collect();
 
     tokio::spawn(async move {
-        let mut prob_stream = _calculate_probs(bingo_line_list, &unchosen_number_set).await;
+        let mut prob_stream = _calculate_probs(bingo_line_list, &unchosen_number_set, 3000).await;
         loop {
             let (n, pattern_count, prob) = prob_stream.next().await.unwrap();
 
@@ -57,6 +57,7 @@ async fn evaluate_bingo_board_and_calculate(
 async fn _calculate_probs<'a>(
     bingo_line_list: Vec<HashSet<i32>>,
     unchosen_number_set: &'a HashSet<i32>,
+    chunk_size: usize,
 ) -> RepeatWith<impl FnMut() -> (i128, i128, f64) + 'a> {
     let mut prob_progress = ProbProgress {
         bingo_count: 0,
@@ -77,28 +78,61 @@ async fn _calculate_probs<'a>(
         new_prob_progress.bingo_count +=
             already_bingo_number * (unchosen_number_set.len() as i128 - (n - 1));
 
-        for chosen_number_set_not_bingo in prob_progress.not_bing_line_set.iter() {
-            for i in unchosen_number_set {
-                if chosen_number_set_not_bingo.contains(i) {
-                    continue;
+        // println!("{}", &prob_progress.not_bing_line_set.len());
+
+        let chunked_not_bing_line_set = prob_progress
+            .not_bing_line_set
+            .chunks(chunk_size)
+            .collect::<Vec<_>>();
+
+        let aggregated_prob_progress = chunked_not_bing_line_set
+            .par_iter()
+            .map(|bingo_line_set| {
+                let mut temporary_prob_progress = ProbProgress {
+                    bingo_count: 0,
+                    not_bing_line_set: vec![],
+                };
+
+                for chosen_number_set_not_bingo in bingo_line_set.iter() {
+                    for i in unchosen_number_set {
+                        if chosen_number_set_not_bingo.contains(i) {
+                            continue;
+                        }
+
+                        let mut new_chosen_number_set = chosen_number_set_not_bingo.clone();
+                        new_chosen_number_set.insert(*i);
+
+                        let is_bingo = bingo_line_list.iter().any(|group| {
+                            group.len() <= (n as usize) && group.is_subset(&new_chosen_number_set)
+                        });
+
+                        if is_bingo {
+                            temporary_prob_progress.bingo_count += 1;
+                        } else {
+                            temporary_prob_progress
+                                .not_bing_line_set
+                                .push(new_chosen_number_set);
+                        }
+                    }
                 }
 
-                let mut new_chosen_number_set = chosen_number_set_not_bingo.clone();
-                new_chosen_number_set.insert(*i);
-
-                let is_bingo = bingo_line_list.iter().any(|group| {
-                    group.len() <= (n as usize) && group.is_subset(&new_chosen_number_set)
-                });
-
-                if is_bingo {
-                    new_prob_progress.bingo_count += 1;
-                } else {
-                    new_prob_progress
-                        .not_bing_line_set
-                        .push(new_chosen_number_set);
-                }
-            }
-        }
+                temporary_prob_progress
+            })
+            .reduce(
+                || ProbProgress {
+                    bingo_count: 0,
+                    not_bing_line_set: vec![],
+                },
+                |mut acc, x: ProbProgress| {
+                    acc.bingo_count += x.bingo_count;
+                    acc.not_bing_line_set.extend(x.not_bing_line_set);
+                    acc
+                },
+            );
+        new_prob_progress.bingo_count += aggregated_prob_progress.bingo_count;
+        new_prob_progress
+            .not_bing_line_set
+            .extend(aggregated_prob_progress.not_bing_line_set);
 
         prob_progress = new_prob_progress;
 
@@ -319,7 +353,7 @@ mod test {
 
     #[tokio::test]
     async fn test_stream_1() {
-        let a = HashSet::from([1, 2, 3, 4, 5]);
+        let unchosen_number_set = HashSet::from([1, 2, 3, 4, 5]);
         let prob_stream = _calculate_probs(
             vec![
                 HashSet::from([1]),          // 1.
@@ -327,7 +361,8 @@ mod test {
                 HashSet::from([1, 4, 5]),    // 3.
                 HashSet::from([3, 4, 5, 2]), // 4.
             ],
-            &a,
+            &unchosen_number_set,
+            3000,
         );
 
         let mut prob_stream = prob_stream.await;
@@ -341,5 +376,83 @@ mod test {
         // 1. 12*3=36patterns
         // 2. 2 x3 x2 = 12patterns
         assert_eq!(prob_stream.next().await, Some((3, 60, 0.8)));
+    }
+
+    #[tokio::test]
+    async fn test_latency_375() {
+        _test_latency(375).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_750() {
+        _test_latency(750).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_1500() {
+        _test_latency(1500).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_3000() {
+        _test_latency(3000).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_6000() {
+        _test_latency(6000).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_12000() {
+        _test_latency(12000).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_24000() {
+        _test_latency(24000).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_48000() {
+        _test_latency(48000).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_96000() {
+        _test_latency(96000).await;
+    }
+
+    #[tokio::test]
+    async fn test_latency_192000() {
+        _test_latency(192000).await;
+    }
+
+    async fn _test_latency(chunk_size: usize) {
+        let unchosen_number_set: HashSet<i32> = (1..70).collect();
+        let prob_stream = _calculate_probs(
+            vec![
+                HashSet::from([1]),
+                HashSet::from([40]),
+                HashSet::from([50]),
+                HashSet::from([60]),
+                HashSet::from([2, 3]),
+                HashSet::from([4, 5]),
+                HashSet::from([5, 6]),
+                HashSet::from([6, 7, 8]),
+                HashSet::from([8, 9, 10]),
+                HashSet::from([10, 11, 12]),
+                HashSet::from([11, 12, 13]),
+                HashSet::from([13, 14, 15]),
+            ],
+            &unchosen_number_set,
+            chunk_size,
+        );
+
+        let mut prob_stream = prob_stream.await;
+        prob_stream.next().await;
+        prob_stream.next().await;
+        prob_stream.next().await;
+        prob_stream.next().await;
     }
 }
