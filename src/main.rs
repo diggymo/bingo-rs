@@ -131,7 +131,7 @@ fn calculate_probs(card: &BingoCard, unchosen_number_set: &HashSet<i32>) -> Vec<
     // [43,12],
     // [12,55],
     // [12,23,69],
-    let bing_line_list: Vec<_> = LINE_PATTERNS
+    let bingo_line_list: Vec<_> = LINE_PATTERNS
         .into_iter()
         .map(|pattern| {
             pattern
@@ -144,7 +144,7 @@ fn calculate_probs(card: &BingoCard, unchosen_number_set: &HashSet<i32>) -> Vec<
 
     let prob_list: Vec<f64> = (1..=PROB_COUNT)
         .map(|i| {
-            let prob = calc_probability(unchosen_number_set, &bing_line_list, i);
+            let prob = calc_probability(unchosen_number_set, &bingo_line_list, i);
             prob
         })
         .collect();
@@ -154,13 +154,13 @@ fn calculate_probs(card: &BingoCard, unchosen_number_set: &HashSet<i32>) -> Vec<
 
 fn recursion(
     unchosen_number_set: &HashSet<i32>,
-    bing_line_list: &Vec<HashSet<i32>>,
+    bingo_line_list: &Vec<HashSet<i32>>,
     picked_number_set: &HashSet<i32>,
     n: usize,
 ) -> i64 {
     if picked_number_set.len() == n {
         // 合否判定する
-        let is_bingo = bing_line_list
+        let is_bingo = bingo_line_list
             .iter()
             .any(|group| group.len() <= n && group.is_subset(&picked_number_set));
 
@@ -178,7 +178,7 @@ fn recursion(
         new_picked_number_set.insert(*i);
         bing_count += recursion(
             unchosen_number_set,
-            bing_line_list,
+            bingo_line_list,
             &new_picked_number_set,
             n,
         );
@@ -189,19 +189,19 @@ fn recursion(
 
 fn calc_probability(
     unchosen_number_set: &HashSet<i32>,
-    bing_line_list: &Vec<HashSet<i32>>,
+    bingo_line_list: &Vec<HashSet<i32>>,
     n: usize,
 ) -> f64 {
     let all_pattern_count = pattern(unchosen_number_set.len() as i128, n as i128);
 
     // 枝切り
-    if bing_line_list.iter().all(|group| group.len() > n) {
+    if bingo_line_list.iter().all(|group| group.len() > n) {
         return 0.0;
     }
 
     let pattern_count = recursion(
         unchosen_number_set,
-        bing_line_list,
+        bingo_line_list,
         &HashSet::new(),
         n as usize,
     );
